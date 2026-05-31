@@ -42,8 +42,9 @@ Keys:
     i:              invert colors
     d:              darken using TINT_COLOR
     [count]P:       Set logical page number of current page to count
-    -:              zoom out (reflowable only)
-    +:              zoom in (reflowable only)
+    -:              zoom out (PDF: zoom ÷1.25; reflowable: smaller font)
+    +:              zoom in  (PDF: zoom ×1.25; reflowable: larger font)
+    W:              reset zoom to fit-to-window
     ctrl-r:         refresh
     q:              quit
 """
@@ -284,6 +285,7 @@ class Document(fitz.Document):
         self.alpha = False
         self.invert = False
         self.tint = False
+        self.zoom = 1.0
         self.tint_color = config.TINT_COLOR
         self.nvim = None
         self.nvim_listen_address = '/tmp/termpdf_nvim_bridge'
@@ -303,7 +305,8 @@ class Document(fitz.Document):
                  'manualcroprect': self.manualcroprect,
                  'alpha': self.alpha,
                  'invert': self.invert,
-                 'tint': self.tint}
+                 'tint': self.tint,
+                 'zoom': self.zoom}
         with open(cachefile, 'w') as f:
             json.dump(state, f)
 
@@ -625,7 +628,7 @@ class Document(fitz.Document):
         # calculate zoom factor
         fx = dw / pw
         fy = dh / ph
-        factor = min(fx,fy)
+        factor = min(fx,fy) * self.zoom
         self.page_states[p].factor = factor
     
         # calculate zoomed dimensions
@@ -1057,8 +1060,9 @@ class shortcuts:
         self.TOGGLE_TINT      = [ord('d')]
         self.SET_PAGE_LABEL   = [ord('P')]
         self.SET_PAGE_ALT     = [ord('I')]
-        self.INC_FONT         = [ord('=')]
+        self.INC_FONT         = [ord('+')]
         self.DEC_FONT         = [ord('-')]
+        self.ZOOM_RESET       = [ord('W')]
         self.OPEN_GUI         = [ord('X')]
         self.REFRESH          = [18, curses.KEY_RESIZE]            # CTRL-R
         self.QUIT             = [3, ord('q')]
@@ -1719,13 +1723,27 @@ def view(file_change,doc):
             stack = [0]
        
         elif key in keys.INC_FONT:
-            doc.set_layout(doc.papersize - count)
-            doc.mark_all_pages_stale()
+            if doc.is_pdf:
+                doc.zoom = min(8.0, doc.zoom * (1.25 ** count))
+                doc.mark_all_pages_stale()
+            else:
+                doc.set_layout(doc.papersize - count)
+                doc.mark_all_pages_stale()
             count_string = ""
             stack = [0]
-        
+
         elif key in keys.DEC_FONT:
-            doc.set_layout(doc.papersize + count)
+            if doc.is_pdf:
+                doc.zoom = max(0.125, doc.zoom / (1.25 ** count))
+                doc.mark_all_pages_stale()
+            else:
+                doc.set_layout(doc.papersize + count)
+                doc.mark_all_pages_stale()
+            count_string = ""
+            stack = [0]
+
+        elif key in keys.ZOOM_RESET:
+            doc.zoom = 1.0
             doc.mark_all_pages_stale()
             count_string = ""
             stack = [0]
