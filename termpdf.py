@@ -286,6 +286,8 @@ class Document(fitz.Document):
         self.invert = False
         self.tint = False
         self.zoom = 1.0
+        self.pan_x = None
+        self.pan_y = None
         self.tint_color = config.TINT_COLOR
         self.nvim = None
         self.nvim_listen_address = '/tmp/termpdf_nvim_bridge'
@@ -323,7 +325,9 @@ class Document(fitz.Document):
         else:
             self.page = p
         self.logicalpage = self.page_to_logical(self.page)
-    
+        self.pan_x = None
+        self.pan_y = None
+
     def goto_logical_page(self, p):
         p = self.logical_to_page(p)
         self.goto_page(p)
@@ -525,28 +529,30 @@ class Document(fitz.Document):
 
     def cells_to_pixels(self, *coords):
         factor = self.page_states[self.page].factor
-        l,t,_,_ = self.page_states[self.page].place
+        l, t, _, _ = self.page_states[self.page].place
+        off_x = self.page_states[self.page].img_off_x
+        off_y = self.page_states[self.page].img_off_y
         pix_coords = []
         for coord in coords:
             col = coord[0]
             row = coord[1]
-            x = (col - l) * scr.cell_width / factor
-            y = (row - t) * scr.cell_height  / factor
-            pix_coords.append((x,y))
+            x = off_x + (col - l) * scr.cell_width / factor
+            y = off_y + (row - t) * scr.cell_height / factor
+            pix_coords.append((x, y))
         return pix_coords
 
     def pixels_to_cells(self, *coords):
         factor = self.page_states[self.page].factor
-        l,t,_,_ = self.page_states[self.page].place
+        l, t, _, _ = self.page_states[self.page].place
+        off_x = self.page_states[self.page].img_off_x
+        off_y = self.page_states[self.page].img_off_y
         cell_coords = []
         for coord in coords:
             x = coord[0]
             y = coord[1]
-            col = (x * factor + l * scr.cell_width) / scr.cell_width
-            row = (y * factor + t * scr.cell_height) / scr.cell_height
-            col = int(col)
-            row = int(row)
-            cell_coords.append((col,row))
+            col = int(((x - off_x) * factor + l * scr.cell_width) / scr.cell_width)
+            row = int(((y - off_y) * factor + t * scr.cell_height) / scr.cell_height)
+            cell_coords.append((col, row))
         return cell_coords
 
     # get text that is inside a Rect
@@ -635,15 +641,50 @@ class Document(fitz.Document):
         zw = factor * pw
         zh = factor * ph
 
-        # calculate place in pixels, convert to cells
-        pix_x = (dw / 2) - (zw / 2)
-        pix_y = (dh / 2) - (zh / 2)
+        # initialize pan to center of page on first display of this page
+        if self.pan_x is None:
+            self.pan_x = pw / 2
+        if self.pan_y is None:
+            self.pan_y = ph / 2
+
+        # clamp pan only when image overflows screen; otherwise force center
+        if zw > dw:
+            half_w = dw / (2 * factor)
+            self.pan_x = max(half_w, min(pw - half_w, self.pan_x))
+        else:
+            self.pan_x = pw / 2
+
+        if zh > dh:
+            half_h = dh / (2 * factor)
+            self.pan_y = max(half_h, min(ph - half_h, self.pan_y))
+        else:
+            self.pan_y = ph / 2
+
+        # raw pixel position (may be negative when zoomed in)
+        pix_x_raw = (dw / 2) - (self.pan_x * factor)
+        pix_y_raw = (dh / 2) - (self.pan_y * factor)
+
+        # sub-image pixel offsets (pixels to skip inside the image)
+        img_off_x = max(0, int(-pix_x_raw))
+        img_off_y = max(0, int(-pix_y_raw))
+
+        # cursor position (always >= 0)
+        pix_x = max(0.0, pix_x_raw)
+        pix_y = max(0.0, pix_y_raw)
+
+        # visible image dimensions after offset
+        visible_w = min(zw - img_off_x, dw - pix_x)
+        visible_h = min(zh - img_off_y, dh - pix_y)
+
+        # convert to cells
         l_col = int(pix_x / scr.cell_width) + 1
         t_row = int(pix_y / scr.cell_height)
-        r_col = l_col + int(zw / scr.cell_width)
-        b_row = t_row + int(zh / scr.cell_height)
+        r_col = l_col + int(visible_w / scr.cell_width)
+        b_row = t_row + int(visible_h / scr.cell_height)
         place = (l_col, t_row, r_col, b_row)
         self.page_states[p].place = place
+        self.page_states[p].img_off_x = img_off_x
+        self.page_states[p].img_off_y = img_off_y
 
         # move cursor to place
         scr.set_cursor(l_col,t_row)
@@ -651,6 +692,7 @@ class Document(fitz.Document):
         # clear previous page
         # display image
         cmd = {'a': 'p', 'i': p + 1, 'z': -1}
+        was_stale = page_state.stale
         if page_state.stale: #or (display and not write_gr_cmd_with_response(cmd)):
             # get zoomed and rotated pixmap
             mat = fitz.Matrix(factor, factor)
@@ -682,8 +724,11 @@ class Document(fitz.Document):
         if display:  
             # clear prevpage
             self.clear_page(self.prevpage)
-            # display the image
-            cmd = {'a': 'p', 'i': p + 1, 'z': -1}
+            # display the image with sub-image offsets for proper panning
+            cmd = {'a': 'p', 'i': p + 1, 'z': -1,
+                   'x': img_off_x, 'y': img_off_y,
+                   'w': int(visible_w), 'h': int(visible_h),
+                   'c': int(visible_w / scr.cell_width), 'r': int(visible_h / scr.cell_height)}
             success = write_gr_cmd_with_response(cmd)
             if not success:
                 self.page_states[p].stale = True
@@ -692,7 +737,8 @@ class Document(fitz.Document):
 
         self.page_states[p].stale = False 
 
-        scr.swallow_keys()
+        if was_stale:
+            scr.swallow_keys()
 
     def show_toc(self, bar):
 
@@ -1000,8 +1046,10 @@ class Page_State:
     def __init__(self, p):
         self.number = p
         self.stale = True
-        self.factor = (1,1)
-        self.place = (0,0,40,40)
+        self.factor = (1, 1)
+        self.place = (0, 0, 40, 40)
+        self.img_off_x = 0
+        self.img_off_y = 0
         self.crop = None
 
 class status_bar:
@@ -1038,6 +1086,10 @@ class shortcuts:
         self.GO_BACK          = [ord('p')]
         self.NEXT_CHAP        = [ord('l'), curses.KEY_RIGHT]
         self.PREV_CHAP        = [ord('h'), curses.KEY_LEFT]
+        self.NEXT_PAGE_ALWAYS = [ord('J')]
+        self.PREV_PAGE_ALWAYS = [ord('K')]
+        self.NEXT_CHAP_ALWAYS = [ord('L')]
+        self.PREV_CHAP_ALWAYS = [ord('H')]
         self.BUFFER_CYCLE     = [ord('b')]
         self.BUFFER_CYCLE_REV = [ord('B')]
         self.HINTS            = [ord('f')]
@@ -1511,7 +1563,8 @@ def view(file_change,doc):
 
     count_string = ""
     stack = [0]
-    keys = shortcuts() 
+    keys = shortcuts()
+    last_pan_time = monotonic()
 
     while True:
 
@@ -1624,13 +1677,83 @@ def view(file_change,doc):
             count_string = ""
             stack = [0]
 
-        elif key in keys.NEXT_PAGE:
+        elif key in keys.NEXT_PAGE_ALWAYS:
             doc.next_page(count)
             count_string = ""
             stack = [0]
 
-        elif key in keys.PREV_PAGE:
+        elif key in keys.PREV_PAGE_ALWAYS:
             doc.prev_page(count)
+            count_string = ""
+            stack = [0]
+
+        elif key in keys.NEXT_CHAP_ALWAYS:
+            doc.next_chap(count)
+            count_string = ""
+            stack = [0]
+
+        elif key in keys.PREV_CHAP_ALWAYS:
+            doc.prev_chap(count)
+            count_string = ""
+            stack = [0]
+
+        elif key in keys.NEXT_PAGE:
+            if doc.zoom > 1.0 and key != ord(" "):
+                factor = doc.page_states[doc.page].factor
+                ph_cur = doc.load_page(doc.page).bound().height
+                dh = scr.height - scr.cell_height
+                half_h = dh / (2 * factor)
+                if count_string == '':
+                    elapsed = min(monotonic() - last_pan_time, 0.15)
+                    step = dh / (4 * factor) * elapsed * 10
+                    last_pan_time = monotonic()
+                else:
+                    step = dh / (4 * factor) * count
+                if doc.pan_y is None:
+                    doc.pan_y = ph_cur / 2
+                target_y = doc.pan_y + step
+                while target_y > ph_cur - half_h and doc.page < doc.pages:
+                    overflow = target_y - (ph_cur - half_h)
+                    doc.next_page(1)
+                    page_new = doc.load_page(doc.page)
+                    ph_cur = page_new.bound().height
+                    factor = min(scr.width / page_new.bound().width, dh / ph_cur) * doc.zoom
+                    half_h = dh / (2 * factor)
+                    doc.pan_y = half_h
+                    target_y = half_h + overflow
+                doc.pan_y = min(ph_cur - half_h, target_y)
+            else:
+                doc.next_page(count)
+            count_string = ""
+            stack = [0]
+
+        elif key in keys.PREV_PAGE:
+            if doc.zoom > 1.0:
+                factor = doc.page_states[doc.page].factor
+                ph_cur = doc.load_page(doc.page).bound().height
+                dh = scr.height - scr.cell_height
+                half_h = dh / (2 * factor)
+                if count_string == '':
+                    elapsed = min(monotonic() - last_pan_time, 0.15)
+                    step = dh / (4 * factor) * elapsed * 10
+                    last_pan_time = monotonic()
+                else:
+                    step = dh / (4 * factor) * count
+                if doc.pan_y is None:
+                    doc.pan_y = ph_cur / 2
+                target_y = doc.pan_y - step
+                while target_y < half_h and doc.page > 0:
+                    remaining = half_h - target_y
+                    doc.prev_page(1)
+                    page_new = doc.load_page(doc.page)
+                    ph_cur = page_new.bound().height
+                    factor = min(scr.width / page_new.bound().width, dh / ph_cur) * doc.zoom
+                    half_h = dh / (2 * factor)
+                    doc.pan_y = ph_cur - half_h
+                    target_y = (ph_cur - half_h) - remaining
+                doc.pan_y = max(half_h, target_y)
+            else:
+                doc.prev_page(count)
             count_string = ""
             stack = [0]
 
@@ -1640,12 +1763,48 @@ def view(file_change,doc):
             stack = [0]
 
         elif key in keys.NEXT_CHAP:
-            doc.next_chap(count)
+            if doc.zoom > 1.0:
+                factor = doc.page_states[doc.page].factor
+                pw_cur = doc.load_page(doc.page).bound().width
+                zw = factor * pw_cur
+                if zw > scr.width:
+                    half_w = scr.width / (2 * factor)
+                    if count_string == '':
+                        elapsed = min(monotonic() - last_pan_time, 0.15)
+                        step = scr.width / (4 * factor) * elapsed * 10
+                        last_pan_time = monotonic()
+                    else:
+                        step = scr.width / (4 * factor) * count
+                    if doc.pan_x is None:
+                        doc.pan_x = pw_cur / 2
+                    doc.pan_x = min(pw_cur - half_w, doc.pan_x + step)
+                else:
+                    doc.next_chap(count)
+            else:
+                doc.next_chap(count)
             count_string = ""
             stack = [0]
 
         elif key in keys.PREV_CHAP:
-            doc.prev_chap(count)
+            if doc.zoom > 1.0:
+                factor = doc.page_states[doc.page].factor
+                pw_cur = doc.load_page(doc.page).bound().width
+                zw = factor * pw_cur
+                if zw > scr.width:
+                    half_w = scr.width / (2 * factor)
+                    if count_string == '':
+                        elapsed = min(monotonic() - last_pan_time, 0.15)
+                        step = scr.width / (4 * factor) * elapsed * 10
+                        last_pan_time = monotonic()
+                    else:
+                        step = scr.width / (4 * factor) * count
+                    if doc.pan_x is None:
+                        doc.pan_x = pw_cur / 2
+                    doc.pan_x = max(half_w, doc.pan_x - step)
+                else:
+                    doc.prev_chap(count)
+            else:
+                doc.prev_chap(count)
             count_string = ""
             stack = [0]
 
@@ -1744,6 +1903,8 @@ def view(file_change,doc):
 
         elif key in keys.ZOOM_RESET:
             doc.zoom = 1.0
+            doc.pan_x = None
+            doc.pan_y = None
             doc.mark_all_pages_stale()
             count_string = ""
             stack = [0]
