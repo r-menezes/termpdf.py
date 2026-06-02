@@ -72,10 +72,14 @@ To cycle through several open files, press `b` (for "buffer").
 Within termpdf, key mappings are meant to be vim-style. For simple
 navigation:
 
-    j, down, space: forward [count] pages
-    k, up:          back [count] pages
-    l, right:       forward [count] sections
-    h, left:        back [count] sections
+    j, down, space: forward [count] pages (pan when zoomed)
+    k, up:          back [count] pages (pan when zoomed)
+    l, right:       forward [count] sections (pan horizontally when zoomed)
+    h, left:        back [count] sections (pan horizontally when zoomed)
+    J:              forward [count] pages (always, even when zoomed)
+    K:              back [count] pages (always, even when zoomed)
+    L:              forward [count] sections (always, even when zoomed)
+    H:              back [count] sections (always, even when zoomed)
     gg:             go to beginning of document
     G:              go to end of document
     [count]G:       go to page [count]
@@ -148,11 +152,16 @@ You can also adjust the display of the document in a variety of ways:
     a:              toggle alpha transparency
     i:              invert colors
     d:              darken using TINT_COLOR
-    -:              zoom out (reflowable only)
-    +:              zoom in (reflowable only)
+    +:              zoom in  (PDF: ×1.25 per press; reflowable: larger font)
+    -:              zoom out (PDF: ÷1.25 per press; reflowable: smaller font)
+    W:              reset zoom to fit-to-window
     ctrl-r:         refresh
 
-Zooming is currently only implemented for reflowable formats, like `epub`.
+For PDFs, zooming in with `+` enables panning. When zoomed in, `j`/`k`
+scroll vertically and `h`/`l` scroll horizontally within the page. Panning
+wraps continuously across pages: scrolling past the bottom of one page
+moves to the top of the next. Use `J`/`K` to jump to the next/previous page
+without panning, and `L`/`H` to jump chapters.
 
 Alpha transparency and autocropping will only work on some PDFs. For manual
 cropping, see the section below, on the visual select mode.
@@ -400,8 +409,8 @@ will open the document up "fresh", ignoring any saved settings.
     -   [x] manual cropping using visual select mode
     -   [ ] fit to width
     -   [ ] fit to height
-    -   [ ] arbitrary zooming 
-    -   [ ] panning
+    -   [x] arbitrary zooming 
+    -   [x] panning
 -   [x] zoom in and out for reflowable documents
 
 ## PDF Manipulation
